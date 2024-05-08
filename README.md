@@ -5,4 +5,4 @@
 
 # Flame SM (Beta)
 
-<p> Flame SM is a Small Language Model (SML) trained on story dataset. It is designed to generate stories. Flame SM is a small version of Flame Language Model family (FLLMF). </p>
+<p> Flame SM is a Small Language Model (SML) trained on story dataset. It is designed to generate stories. Flame SM is a small version of Flame Language Model family.</p>
