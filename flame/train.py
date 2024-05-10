@@ -1,6 +1,8 @@
 import os
 import torch
 import numpy as np
+from typing import Optional
+from dataclasses import dataclass
 
 from model import Transformer
 from tokenizer import Tokenizer
@@ -12,23 +14,48 @@ dataset = "poem"
 batch_size = 32
 block_size = 1080
 learning_rate = 6e-4
+
+dim: int = 256
+n_layers: int = 8
+n_heads: int = 8
+vocab_size: int = -1
+n_kv_heads: Optional[int] = None
+hidden_dim: int = 1024
+dropout = 0.2
+
 device = 'cuda'
 device_type = 'cuda' if 'cuda' in device else 'cpu'
+
+@dataclass
+class ModelArgs:
+    dim: int = 256
+    n_layers: int = 8
+    n_heads: int = 8
+    vocab_size: int = 5000
+    n_kv_heads: Optional[int] = None
+    hidden_dim: int = 1024
+    dropout = 0.2
+    head_dim: int = dim // n_heads
+
+    batch_size: int = 32
+    block_size = 1080
+    max_seq_len: int = 1080
 
 # loading dataset
 tokenizer = Tokenizer()
 data_dir = os.path.join("data", dataset)
 def get_batch(split):
     if split == "train":
-        data = np.memmap(os.path.join(data_dir, 'train.txt'), dtype=np.uint16, mode='r')
+        data = tokenizer.encode(open(os.path.join(data_dir, 'train.txt')).read(), sos=False, eos=False)
+        data = torch.tensor(data, dtype=torch.long)
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.txt'), dtype=np.uint16, mode='r')
+        data = tokenizer.encode(open(os.path.join(data_dir, 'val.txt')).read(), sos=False, eos=False)
+        data = torch.tensor(data, dtype=torch.long)
 
     # encoding data into number
-    data = tokenizer.encode(data, sos=False, eos=False)
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
 
     if device_type == 'cuda':
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -38,7 +65,7 @@ def get_batch(split):
     return x, y
 
 # loading model
-model = Transformer()
+model = Transformer(ModelArgs)
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 # estimating loss
@@ -75,11 +102,11 @@ def train(model_dir, ex_model_dir = None):
     # if train from scratch
     model_path = os.path.join(model_dir, "flame_sm_10.pt")
     if ex_model_dir == None:
-        for epoch in epochs:
+        for epoch in range(epochs):
             # every once in a while evaluate the loss on train and val sets
-            if iter % eval_iters == 0 or iter == epochs - 1:
+            if epoch % eval_iters == 0 or epoch == epochs - 1:
                 losses = estimate_loss()
-                print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+                print(f"step {epoch}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
             xb, yb = get_batch('train')
             logits, loss = model(xb, yb)
@@ -94,9 +121,9 @@ def train(model_dir, ex_model_dir = None):
         model.load_state_dict(model_state_dict)
 
         for epoch in range(start_epoch, epochs):
-            if iter % eval_iters == 0 or iter == epochs - 1:
+            if epoch % eval_iters == 0 or epoch == epochs - 1:
                 losses = estimate_loss()
-                print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+                print(f"step {epoch}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
             xb, yb = get_batch('train')
             logits, loss = model(xb, yb)

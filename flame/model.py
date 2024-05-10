@@ -13,7 +13,7 @@ class ModelArgs:
     n_layers: int = 8
     n_heads: int = 8
     vocab_size: int = -1
-    n_kv_heads: Optional[int] = None
+    n_kv_heads: int = 1
     hidden_dim: int = 1024
     dropout = 0.2
 
@@ -33,7 +33,7 @@ class Attention(nn.Module):
         self.head_dim = args.dim // args.n_heads
         self.n_kv_heads = args.n_kv_heads
 
-        self.repeats = self.n_heads // self.n_kv_heads
+        self.repeats = self.n_heads
 
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
@@ -90,7 +90,7 @@ class LayerNorm(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(self, args: ModelArgs):
-        super().__init__
+        super().__init__()
         self.ln_1 = LayerNorm(args.dim, bias=False)
         self.attn = Attention(args)
         self.ln_2 = LayerNorm(args.dim, bias=False)
@@ -105,14 +105,16 @@ class TransformerBlock(nn.Module):
     
 class Transformer(nn.Module):
     def __init__(self, args: ModelArgs):
-        super().__init__
+        super().__init__()
+        assert args.vocab_size is not None
+        assert args.block_size is not None
         self.args = args
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(args.vocab_size, args.dim),
             wpe = nn.Embedding(args.block_size, args.dim),
             drop = nn.Dropout(args.dropout),
-            h = nn.ModuleList([Transformer(args) for _ in range(args.n_layers)]),
+            h = nn.ModuleList([TransformerBlock(args) for _ in range(args.n_layers)]),
             ln_f = LayerNorm(args.dim, bias=False),
         ))
 
