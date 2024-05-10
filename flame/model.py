@@ -113,7 +113,7 @@ class Transformer(nn.Module):
             wpe = nn.Embedding(args.block_size, args.dim),
             drop = nn.Dropout(args.dropout),
             h = nn.ModuleList([Transformer(args) for _ in range(args.n_layers)]),
-            ln_f = LayerNorm(args.dim, bias=True),
+            ln_f = LayerNorm(args.dim, bias=False),
         ))
 
         self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
