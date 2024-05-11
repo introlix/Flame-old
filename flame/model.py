@@ -10,12 +10,13 @@ from torch.nn import functional as F
 @dataclass
 class ModelArgs:
     dim: int = 256
-    n_layers: int = 8
-    n_heads: int = 8
-    vocab_size: int = -1
-    n_kv_heads: int = 1
+    n_layers: int = 6
+    n_heads: int = 6
+    vocab_size: int = 0 # vocab_size going to change during training
+    n_kv_heads: Optional[int] = None
     hidden_dim: int = 1024
     dropout = 0.2
+    head_dim: int = dim // n_heads
 
     batch_size: int = 32
     block_size = 1080
@@ -28,8 +29,8 @@ class Attention(nn.Module):
         self.args = args
 
         self.n_heads = args.n_heads
-        self.att_dropout = args.dropout
-        self.resid_dropout = args.dropout
+        self.att_dropout = nn.Dropout(args.dropout)
+        self.resid_dropout = nn.Dropout(args.dropout)
         self.head_dim = args.dim // args.n_heads
         self.n_kv_heads = args.n_kv_heads
 
@@ -38,23 +39,32 @@ class Attention(nn.Module):
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(args.n_heads * args.head_dim, args.dim, bias=False)
+        self.wo = nn.Linear(args.dim, args.dim, bias=False)
+
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+
+            self.register_buffer("bias", torch.tril(torch.ones(args.block_size, args.block_size))
+                                        .view(1, 1, args.block_size, args.block_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seqlen, n_embd = x.shape
+        batch_size, seqlen, n_embd = x.size()
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x) # (batch_size, seqlen, n_head, head_dim)
 
         xq = xq.view(batch_size, seqlen, self.n_heads, self.head_dim).transpose(1, 2) # (batch_size, n_head, seqlen, head_dim)
         xk = xk.view(batch_size, seqlen, self.n_heads, self.head_dim).transpose(1, 2) # (batch_size, n_head, seqlen, head_dim)
         xv = xv.view(batch_size, seqlen, self.n_heads, self.head_dim).transpose(1, 2) # (batch_size, n_head, seqlen, head_dim)
 
-        att = xq @ xk.transpose(-2, -1) # (batch_size, n_head, seqlen, head_dim) @ (batch_size, n_head, head_dim, seqlen) -> (batch_size, n_head, seqlen, seqlen)
-        att = att * (1.0 / math.sqrt(xk.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:seqlen,:seqlen] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.att_dropout(att)
-        y = att @ xv # (batch_size, n_head, seqlen, seqlen) x (batch_size, n_head, seqlen, head_dim) -> (batch_size, n_head, seqlen, head_dim)
-
+        if self.flash:
+            y = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            att = (xq @ xk.transpose(-2, -1)) * (1.0 / math.sqrt(xk.size(-1))) # (batch_size, n_head, seqlen, head_dim) @ (batch_size, n_head, head_dim, seqlen) -> (batch_size, n_head, seqlen, seqlen)
+            att = att.masked_fill(self.bias[:,:,:seqlen,:seqlen] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            att = self.att_dropout(att)
+            y = att @ xv # (batch_size, n_head, seqlen, seqlen) x (batch_size, n_head, seqlen, head_dim) -> (batch_size, n_head, seqlen, head_dim)
         y = y.transpose(1, 2).contiguous().view(batch_size, seqlen, n_embd)
 
         y = self.resid_dropout(self.wo(y))
@@ -69,7 +79,7 @@ class FeedForward(nn.Module):
         self.w1 = nn.Linear(args.dim, args.hidden_dim, bias=False)
         self.gelu = nn.GELU()
         self.w2 = nn.Linear(args.hidden_dim, args.dim, bias=False)
-        self.dropout = args.dropout
+        self.dropout = nn.Dropout(args.dropout)
 
     def forward(self, x) -> torch.Tensor:
         x = self.w1(x)
@@ -108,6 +118,7 @@ class Transformer(nn.Module):
         super().__init__()
         assert args.vocab_size is not None
         assert args.block_size is not None
+        print(args.vocab_size)
         self.args = args
 
         self.transformer = nn.ModuleDict(dict(
@@ -123,6 +134,8 @@ class Transformer(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
 
         self.apply(self._init_weights)
+
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
 
     def get_num_params(self, non_embedding=True):
@@ -141,8 +154,7 @@ class Transformer(nn.Module):
 
     def forward(self, idx, targets = None):
         device = idx.device
-        _, seqlen = idx.size()
-
+        batch_size, seqlen = idx.size()
         assert seqlen <= self.args.block_size, f"Cannot forward sequence of length {seqlen}, block size is only {self.args.block_size}"
 
         pos = torch.arange(0, seqlen, dtype=torch.long, device=device)

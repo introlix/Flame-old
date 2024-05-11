@@ -2,70 +2,56 @@ import os
 import torch
 import numpy as np
 from typing import Optional
-from dataclasses import dataclass
 
-from model import Transformer
+from model import Transformer, ModelArgs
 from tokenizer import Tokenizer
 
 # training configuration
 epochs = 5
 eval_iters = 1
-dataset = "poem"
-batch_size = 32
+dataset = "corpus"
+batch_size = 6
 block_size = 1080
 learning_rate = 6e-4
 
 dim: int = 256
-n_layers: int = 8
-n_heads: int = 8
+n_layers: int = 4
+n_heads: int = 4
 vocab_size: int = -1
 n_kv_heads: Optional[int] = None
 hidden_dim: int = 1024
 dropout = 0.2
+head_dim = dim // n_heads
 
-device = 'cuda'
-device_type = 'cuda' if 'cuda' in device else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-@dataclass
-class ModelArgs:
-    dim: int = 256
-    n_layers: int = 8
-    n_heads: int = 8
-    vocab_size: int = 5000
-    n_kv_heads: Optional[int] = None
-    hidden_dim: int = 1024
-    dropout = 0.2
-    head_dim: int = dim // n_heads
-
-    batch_size: int = 32
-    block_size = 1080
-    max_seq_len: int = 1080
-
-# loading dataset
-tokenizer = Tokenizer()
+# loading the datasets
 data_dir = os.path.join("data", dataset)
-def get_batch(split):
-    if split == "train":
-        data = tokenizer.encode(open(os.path.join(data_dir, 'train.txt')).read(), sos=False, eos=False)
-        data = torch.tensor(data, dtype=torch.long)
-    else:
-        data = tokenizer.encode(open(os.path.join(data_dir, 'val.txt')).read(), sos=False, eos=False)
-        data = torch.tensor(data, dtype=torch.long)
+tokenizer = Tokenizer()
+data = torch.tensor(tokenizer.encode(open(os.path.join(data_dir, 'train.txt')).read(), sos=False, eos=False))
+n = int(0.9*len(data)) # first 90% will be train, rest val
+train_data = data[:n]
+val_data = data[n:]
 
-    # encoding data into number
+# getting the batch and input & target
+def get_batch(split):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == 'train' else val_data
+
+    # get input and target
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
 
-    if device_type == 'cuda':
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
+    x, y = x.to(device), y.to(device)
 
     return x, y
 
 # loading model
-model = Transformer(ModelArgs)
+model_args = dict(dim = dim, n_layers = n_layers, n_heads = n_heads, vocab_size=tokenizer.n_words, n_kv_heads = None, hidden_dim = hidden_dim, head_dim=head_dim, batch_size = batch_size, max_seq_len=1080)
+args = ModelArgs(**model_args)
+model = Transformer(args)
+model = model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 # estimating loss
@@ -98,9 +84,10 @@ def load_checkpoint(filename):
     checkpoint = torch.load(filename)
     return checkpoint['epoch'], checkpoint['model_state_dict'], checkpoint['optimizer_state_dict']
 
+# training the model
 def train(model_dir, ex_model_dir = None):
     # if train from scratch
-    model_path = os.path.join(model_dir, "flame_sm_10.pt")
+    model_path = os.path.join(model_dir, f"flame_sm_{str(model.get_num_params())[:2]}M.pt")
     if ex_model_dir == None:
         for epoch in range(epochs):
             # every once in a while evaluate the loss on train and val sets
@@ -133,3 +120,5 @@ def train(model_dir, ex_model_dir = None):
 
             if epoch % 5 == 0:
                 save_checkpoint(epoch, model, optimizer, model_path)
+                
+train("./model")
